@@ -7,74 +7,63 @@ import (
 	"time"
 )
 
-// ----------------------------------------------------
-//  Internal token-bucket structure (per user)
-// ----------------------------------------------------
+// ----------------------------
+// Sliding-window limiter per user
+// ----------------------------
 
-// rateLimiter represents a simple token bucket for one user.
 type rateLimiter struct {
-	mu        sync.Mutex
-	capacity  float64   // maximum number of tokens (burst size)
-	tokens    float64   // current available tokens
-	rate      float64   // tokens added per second
-	lastCheck time.Time // last refill timestamp
+	mu       sync.Mutex
+	requests []time.Time
+	capacity int
 }
 
-// newRateLimiter creates a new token bucket with a given rate and capacity.
+// newRateLimiter creates a limiter with a max number of requests per second.
 func newRateLimiter(limit int) *rateLimiter {
-	now := time.Now()
 	return &rateLimiter{
-		capacity:  float64(limit),
-		tokens:    float64(limit),
-		rate:      float64(limit),
-		lastCheck: now,
+		requests: make([]time.Time, 0, limit),
+		capacity: limit,
 	}
 }
 
-// allow consumes a token if available and returns true; otherwise false.
+// allow checks if a request is allowed, updates timestamps slice
 func (rl *rateLimiter) allow() bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
-	elapsed := now.Sub(rl.lastCheck).Seconds()
-	rl.lastCheck = now
+	cutoff := now.Add(-1 * time.Second)
 
-	// Refill tokens based on elapsed time
-	rl.tokens += elapsed * rl.rate
-	if rl.tokens > rl.capacity {
-		rl.tokens = rl.capacity
+	// Remove timestamps older than 1 second
+	i := 0
+	for ; i < len(rl.requests); i++ {
+		if rl.requests[i].After(cutoff) {
+			break
+		}
 	}
+	rl.requests = rl.requests[i:]
 
-	if rl.tokens >= 1 {
-		rl.tokens--
+	if len(rl.requests) < rl.capacity {
+		rl.requests = append(rl.requests, now)
 		return true
 	}
 	return false
 }
 
-// ----------------------------------------------------
-//  Global structures for all users
-// ----------------------------------------------------
+// ----------------------------
+// Global maps
+// ----------------------------
 
-// userBuckets stores a rateLimiter per user safely across goroutines.
 var userBuckets sync.Map // map[string]*rateLimiter
+var userConfig sync.Map  // map[string]int
 
-// userConfig stores dynamic per-user rate limits (requests per second).
-// These override the "limit" argument passed to RateLimit if present.
-var userConfig sync.Map // map[string]int
+// ----------------------------
+// Configuration management
+// ----------------------------
 
-// ----------------------------------------------------
-//  Configuration management
-// ----------------------------------------------------
-
-// SetUserLimit dynamically updates or adds a rate limit for a user.
-// Safe for concurrent use.
 func SetUserLimit(userID string, limit int) {
 	userConfig.Store(userID, limit)
 }
 
-// GetUserLimit returns the configured limit for a user, or ok=false if none.
 func GetUserLimit(userID string) (int, bool) {
 	val, ok := userConfig.Load(userID)
 	if !ok {
@@ -83,52 +72,35 @@ func GetUserLimit(userID string) (int, bool) {
 	return val.(int), true
 }
 
-// LoadUserConfigFromJSON loads user limits from a JSON file.
-// Example file:
-//
-//	{
-//	  "alice": 5,
-//	  "bob": 10
-//	}
 func LoadUserConfigFromJSON(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-
 	var cfg map[string]int
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return err
 	}
-
 	for user, limit := range cfg {
 		SetUserLimit(user, limit)
 	}
 	return nil
 }
 
-// ----------------------------------------------------
-//  Main API
-// ----------------------------------------------------
+// ----------------------------
+// Main API
+// ----------------------------
 
-// RateLimit limits the number of requests per second per user in a single instance.
-//
-// Parameters:
-//   - userID: unique user identifier
-//   - limit:  default max requests per second (used if user has no custom config)
-//
-// Returns true if the request is allowed, false if denied.
 func RateLimit(userID string, limit int) bool {
 	if limit <= 0 {
 		return false
 	}
 
-	// Override if a user-specific limit exists
+	// Override if user has custom config
 	if custom, ok := GetUserLimit(userID); ok {
 		limit = custom
 	}
 
-	// Try to load or create a limiter for this user
 	val, ok := userBuckets.Load(userID)
 	if !ok {
 		newRL := newRateLimiter(limit)
@@ -136,13 +108,14 @@ func RateLimit(userID string, limit int) bool {
 	}
 	rl := val.(*rateLimiter)
 
-	// If rate changed (via config), adjust dynamically
+	// Update capacity if dynamic limit changed
 	rl.mu.Lock()
-	if rl.rate != float64(limit) {
-		rl.rate = float64(limit)
-		rl.capacity = float64(limit)
-		if rl.tokens > rl.capacity {
-			rl.tokens = rl.capacity
+	if rl.capacity != limit {
+		rl.capacity = limit
+		if cap(rl.requests) < limit {
+			newRequests := make([]time.Time, len(rl.requests), limit)
+			copy(newRequests, rl.requests)
+			rl.requests = newRequests
 		}
 	}
 	rl.mu.Unlock()

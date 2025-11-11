@@ -6,10 +6,9 @@ import (
 	"testing"
 )
 
-// ------------------------------------------------------------
+// ----------------------------
 // Benchmark: single-user sequential requests
-// ------------------------------------------------------------
-
+// ----------------------------
 func BenchmarkRateLimit_SingleUser(b *testing.B) {
 	resetLimiterState()
 	user := "bench-user"
@@ -21,10 +20,9 @@ func BenchmarkRateLimit_SingleUser(b *testing.B) {
 	}
 }
 
-// ------------------------------------------------------------
-// Benchmark: multiple users concurrently
-// ------------------------------------------------------------
-
+// ----------------------------
+// Benchmark: multi-user concurrent requests
+// ----------------------------
 func BenchmarkRateLimit_MultiUserConcurrent(b *testing.B) {
 	resetLimiterState()
 	numUsers := 100
@@ -46,10 +44,9 @@ func BenchmarkRateLimit_MultiUserConcurrent(b *testing.B) {
 	})
 }
 
-// ------------------------------------------------------------
+// ----------------------------
 // Benchmark: high concurrency single user
-// ------------------------------------------------------------
-
+// ----------------------------
 func BenchmarkRateLimit_ConcurrentSingleUser(b *testing.B) {
 	resetLimiterState()
 	user := "hot-user"
@@ -61,6 +58,32 @@ func BenchmarkRateLimit_ConcurrentSingleUser(b *testing.B) {
 
 	b.ResetTimer()
 	wg.Add(concurrency)
+	for g := 0; g < concurrency; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < opsPerGoroutine; i++ {
+				_ = RateLimit(user, limit)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// ----------------------------
+// Benchmark: sliding window precision under concurrency
+// Simulate 3 requests per second for a hot user
+// ----------------------------
+func BenchmarkRateLimit_SlidingWindowHotUser(b *testing.B) {
+	resetLimiterState()
+	user := "hot-user"
+	limit := 3
+
+	var wg sync.WaitGroup
+	concurrency := 10
+	opsPerGoroutine := b.N / concurrency
+
+	wg.Add(concurrency)
+	b.ResetTimer()
 	for g := 0; g < concurrency; g++ {
 		go func() {
 			defer wg.Done()

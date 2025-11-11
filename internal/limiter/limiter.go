@@ -1,63 +1,27 @@
 package limiter
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+var (
+	// In-memory sliding-window
+	userBuckets = sync.Map{} // map[userID][]int64
+	userConfig  = sync.Map{} // map[userID]int
+
+	// Redis
+	rdb *redis.Client
+	ctx = context.Background()
 )
 
 // ----------------------------
-// Sliding-window limiter per user
-// ----------------------------
-
-type rateLimiter struct {
-	mu       sync.Mutex
-	requests []time.Time
-	capacity int
-}
-
-// newRateLimiter creates a limiter with a max number of requests per second.
-func newRateLimiter(limit int) *rateLimiter {
-	return &rateLimiter{
-		requests: make([]time.Time, 0, limit),
-		capacity: limit,
-	}
-}
-
-// allow checks if a request is allowed, updates timestamps slice
-func (rl *rateLimiter) allow() bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	now := time.Now()
-	cutoff := now.Add(-1 * time.Second)
-
-	// Remove timestamps older than 1 second
-	i := 0
-	for ; i < len(rl.requests); i++ {
-		if rl.requests[i].After(cutoff) {
-			break
-		}
-	}
-	rl.requests = rl.requests[i:]
-
-	if len(rl.requests) < rl.capacity {
-		rl.requests = append(rl.requests, now)
-		return true
-	}
-	return false
-}
-
-// ----------------------------
-// Global maps
-// ----------------------------
-
-var userBuckets sync.Map // map[string]*rateLimiter
-var userConfig sync.Map  // map[string]int
-
-// ----------------------------
-// Configuration management
+// Per-user config
 // ----------------------------
 
 func SetUserLimit(userID string, limit int) {
@@ -65,13 +29,14 @@ func SetUserLimit(userID string, limit int) {
 }
 
 func GetUserLimit(userID string) (int, bool) {
-	val, ok := userConfig.Load(userID)
+	v, ok := userConfig.Load(userID)
 	if !ok {
 		return 0, false
 	}
-	return val.(int), true
+	return v.(int), true
 }
 
+// Load JSON config
 func LoadUserConfigFromJSON(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -88,37 +53,86 @@ func LoadUserConfigFromJSON(path string) error {
 }
 
 // ----------------------------
-// Main API
+// In-memory sliding-window limiter
 // ----------------------------
 
-func RateLimit(userID string, limit int) bool {
-	if limit <= 0 {
+func RateLimit(userID string, defaultLimit int) bool {
+	limit := defaultLimit
+	if cfg, ok := GetUserLimit(userID); ok {
+		limit = cfg
+	}
+
+	now := time.Now().UnixMilli()
+	val, _ := userBuckets.LoadOrStore(userID, &sync.Mutex{})
+	mtx := val.(*sync.Mutex)
+
+	mtx.Lock()
+	defer mtx.Unlock()
+
+	rawSlice, _ := userBuckets.LoadOrStore(userID+"_slice", &[]int64{})
+	tsSlice := rawSlice.(*[]int64)
+
+	// remove old timestamps
+	newSlice := []int64{}
+	for _, ts := range *tsSlice {
+		if now-ts < 1000 {
+			newSlice = append(newSlice, ts)
+		}
+	}
+	if len(newSlice) >= limit {
+		*tsSlice = newSlice
+		return false
+	}
+	newSlice = append(newSlice, now)
+	*tsSlice = newSlice
+	return true
+}
+
+// ----------------------------
+// Redis support
+// ----------------------------
+
+func InitRedis(addr string, password string, db int) {
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: password,
+		DB:       db,
+	})
+}
+
+// Distributed sliding-window
+func RateLimitRedis(userID string, limit int) bool {
+	if rdb == nil || limit <= 0 {
 		return false
 	}
 
-	// Override if user has custom config
-	if custom, ok := GetUserLimit(userID); ok {
-		limit = custom
-	}
+	now := time.Now().UnixMilli()
+	oneSecondAgo := now - 1000
+	key := "rate:" + userID
 
-	val, ok := userBuckets.Load(userID)
-	if !ok {
-		newRL := newRateLimiter(limit)
-		val, _ = userBuckets.LoadOrStore(userID, newRL)
+	script := redis.NewScript(`
+		redis.call("ZREMRANGEBYSCORE", KEYS[1], 0, ARGV[1])
+		local current = redis.call("ZCARD", KEYS[1])
+		if tonumber(current) < tonumber(ARGV[2]) then
+			redis.call("ZADD", KEYS[1], ARGV[3], ARGV[3])
+			redis.call("PEXPIRE", KEYS[1], 2000)
+			return 1
+		else
+			return 0
+		end
+	`)
+	res, err := script.Run(ctx, rdb, []string{key}, oneSecondAgo, limit, now).Int()
+	if err != nil {
+		return false
 	}
-	rl := val.(*rateLimiter)
+	return res == 1
+}
 
-	// Update capacity if dynamic limit changed
-	rl.mu.Lock()
-	if rl.capacity != limit {
-		rl.capacity = limit
-		if cap(rl.requests) < limit {
-			newRequests := make([]time.Time, len(rl.requests), limit)
-			copy(newRequests, rl.requests)
-			rl.requests = newRequests
-		}
+// RateLimitRedis with dynamic per-user config
+func RateLimitRedisWithConfig(userID string, defaultLimit int) bool {
+	limit := defaultLimit
+	if cfg, ok := GetUserLimit(userID); ok {
+		limit = cfg
 	}
-	rl.mu.Unlock()
-
-	return rl.allow()
+	return RateLimitRedis(userID, limit)
 }

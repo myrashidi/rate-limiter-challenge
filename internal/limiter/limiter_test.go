@@ -9,48 +9,38 @@ import (
 	"time"
 )
 
-// resetLimiterState clears all global state for clean test environment
 func resetLimiterState() {
 	userBuckets = sync.Map{}
 	userConfig = sync.Map{}
 }
 
 // ----------------------------
-// Test: single-user sliding window
+// In-memory tests
 // ----------------------------
 func TestRateLimit_SingleUserSlidingWindow(t *testing.T) {
 	resetLimiterState()
 	user := "userA"
 	limit := 3
 
-	// Send exactly `limit` requests → all allowed
 	for i := 1; i <= limit; i++ {
 		if !RateLimit(user, limit) {
 			t.Fatalf("request %d should be allowed", i)
 		}
 	}
 
-	// Next request → should be denied
 	if RateLimit(user, limit) {
 		t.Fatal("request exceeding limit should be denied")
 	}
 
-	// Wait >1s to slide window
 	time.Sleep(1100 * time.Millisecond)
-
-	// Now requests can pass again
 	if !RateLimit(user, limit) {
 		t.Fatal("request after window slides should be allowed")
 	}
 }
 
-// ----------------------------
-// Test: multiple users independent
-// ----------------------------
 func TestRateLimit_MultipleUsersIndependent(t *testing.T) {
 	resetLimiterState()
-	u1 := "alice"
-	u2 := "bob"
+	u1, u2 := "alice", "bob"
 	limit := 2
 
 	for i := 1; i <= limit; i++ {
@@ -62,93 +52,58 @@ func TestRateLimit_MultipleUsersIndependent(t *testing.T) {
 		}
 	}
 
-	// Next requests → denied
-	if RateLimit(u1, limit) {
-		t.Fatalf("%s request exceeding limit should be denied", u1)
-	}
-	if RateLimit(u2, limit) {
-		t.Fatalf("%s request exceeding limit should be denied", u2)
+	if RateLimit(u1, limit) || RateLimit(u2, limit) {
+		t.Fatal("requests exceeding limit should be denied")
 	}
 }
 
-// ----------------------------
-// Test: sliding window precision
-// ----------------------------
 func TestRateLimit_SlidingWindowPrecision(t *testing.T) {
 	resetLimiterState()
 	user := "precise-user"
 	limit := 3
 
-	// Send exactly `limit` requests
 	for i := 1; i <= limit; i++ {
 		if !RateLimit(user, limit) {
 			t.Fatalf("request %d should be allowed", i)
 		}
 	}
-
-	// Next request → denied
 	if RateLimit(user, limit) {
 		t.Fatal("request exceeding limit should be denied")
 	}
 
-	// Wait >1s for oldest request to slide
 	time.Sleep(1100 * time.Millisecond)
-
-	// Now one request should be allowed
-	for i := 1; i <= limit; i++ {
-		if !RateLimit(user, limit) {
-			t.Fatal("request after window slides should be allowed")
-		}
+	if !RateLimit(user, limit) {
+		t.Fatal("request after window slides should be allowed")
 	}
-
-	// Next request → denied until next slide
 	if RateLimit(user, limit) {
 		t.Fatal("next request should still be denied until window slides again")
 	}
 }
 
-// ----------------------------
-// Test: dynamic per-user configuration
-// ----------------------------
 func TestRateLimit_UsesConfiguredLimit(t *testing.T) {
 	resetLimiterState()
 	user := "alice"
-	SetUserLimit(user, 2) // override default limit
+	SetUserLimit(user, 2)
 
-	// First 2 requests → allowed
-	if !RateLimit(user, 100) {
-		t.Fatal("first request should be allowed (config override)")
+	if !RateLimit(user, 100) || !RateLimit(user, 100) {
+		t.Fatal("first two requests should be allowed")
 	}
-	if !RateLimit(user, 100) {
-		t.Fatal("second request should be allowed (config override)")
-	}
-
-	// Third request → denied
 	if RateLimit(user, 100) {
-		t.Fatal("third request should be denied (config override)")
+		t.Fatal("third request should be denied")
 	}
 }
 
-// ----------------------------
-// Test: load config from JSON file
-// ----------------------------
 func TestLoadUserConfigFromJSON(t *testing.T) {
 	resetLimiterState()
 	tmpFile := "test_users.json"
-	configJSON := `{
-		"alice": 2,
-		"bob": 4
-	}`
-	if err := os.WriteFile(tmpFile, []byte(configJSON), 0644); err != nil {
-		t.Fatalf("failed to write temp config: %v", err)
-	}
+	configJSON := `{"alice":2,"bob":4}`
+	os.WriteFile(tmpFile, []byte(configJSON), 0644)
 	defer os.Remove(tmpFile)
 
 	if err := LoadUserConfigFromJSON(tmpFile); err != nil {
-		t.Fatalf("failed to load config: %v", err)
+		t.Fatal(err)
 	}
 
-	// Test alice limit = 2
 	user := "alice"
 	for i := 1; i <= 2; i++ {
 		if !RateLimit(user, 100) {
@@ -159,7 +114,6 @@ func TestLoadUserConfigFromJSON(t *testing.T) {
 		t.Fatal("alice third request should be denied")
 	}
 
-	// Test bob limit = 4
 	user = "bob"
 	for i := 1; i <= 4; i++ {
 		if !RateLimit(user, 100) {
@@ -171,9 +125,6 @@ func TestLoadUserConfigFromJSON(t *testing.T) {
 	}
 }
 
-// ----------------------------
-// Test: concurrency for single user
-// ----------------------------
 func TestRateLimit_ConcurrentSingleUser(t *testing.T) {
 	resetLimiterState()
 	user := "concurrent-user"
@@ -183,7 +134,6 @@ func TestRateLimit_ConcurrentSingleUser(t *testing.T) {
 	var allowed int32
 	var wg sync.WaitGroup
 	wg.Add(tryCount)
-
 	for i := 0; i < tryCount; i++ {
 		go func() {
 			defer wg.Done()
@@ -193,18 +143,11 @@ func TestRateLimit_ConcurrentSingleUser(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-
-	if allowed > int32(limit) {
-		t.Fatalf("allowed more requests (%d) than limit (%d)", allowed, limit)
-	}
-	if allowed == 0 {
-		t.Fatalf("expected at least 1 allowed request, got 0")
+	if allowed > int32(limit) || allowed == 0 {
+		t.Fatalf("unexpected allowed requests: %d", allowed)
 	}
 }
 
-// ----------------------------
-// Test: multi-user concurrency
-// ----------------------------
 func TestRateLimit_MultiUserConcurrent(t *testing.T) {
 	resetLimiterState()
 	numUsers := 50
@@ -230,4 +173,27 @@ func TestRateLimit_MultiUserConcurrent(t *testing.T) {
 		}(u)
 	}
 	wg.Wait()
+}
+
+// ----------------------------
+// Redis tests
+// ----------------------------
+func TestRateLimitRedisBasic(t *testing.T) {
+	InitRedis("localhost:6379", "", 0)
+	user := "redis-user"
+	limit := 3
+	rdb.Del(ctx, "rate:"+user)
+
+	for i := 1; i <= limit; i++ {
+		if !RateLimitRedis(user, limit) {
+			t.Fatalf("request %d should be allowed", i)
+		}
+	}
+	if RateLimitRedis(user, limit) {
+		t.Fatal("next request should be denied")
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if !RateLimitRedis(user, limit) {
+		t.Fatal("request after window slides should be allowed")
+	}
 }

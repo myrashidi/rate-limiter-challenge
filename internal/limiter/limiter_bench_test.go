@@ -7,7 +7,7 @@ import (
 )
 
 // ----------------------------
-// Benchmark: single-user sequential requests
+// In-memory benchmarks
 // ----------------------------
 func BenchmarkRateLimit_SingleUser(b *testing.B) {
 	resetLimiterState()
@@ -20,42 +20,37 @@ func BenchmarkRateLimit_SingleUser(b *testing.B) {
 	}
 }
 
-// ----------------------------
-// Benchmark: multi-user concurrent requests
-// ----------------------------
 func BenchmarkRateLimit_MultiUserConcurrent(b *testing.B) {
 	resetLimiterState()
 	numUsers := 100
+	limit := 50
 	users := make([]string, numUsers)
 	for i := 0; i < numUsers; i++ {
 		users[i] = "user-" + strconv.Itoa(i)
 	}
 
-	limit := 50
-
+	var wg sync.WaitGroup
 	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		i := 0
-		for pb.Next() {
-			user := users[i%numUsers]
-			_ = RateLimit(user, limit)
-			i++
+	for g := 0; g < b.N; g++ {
+		for _, u := range users {
+			wg.Add(1)
+			go func(user string) {
+				defer wg.Done()
+				_ = RateLimit(user, limit)
+			}(u)
 		}
-	})
+	}
+	wg.Wait()
 }
 
-// ----------------------------
-// Benchmark: high concurrency single user
-// ----------------------------
 func BenchmarkRateLimit_ConcurrentSingleUser(b *testing.B) {
 	resetLimiterState()
 	user := "hot-user"
 	limit := 1000
-
-	var wg sync.WaitGroup
 	concurrency := 50
 	opsPerGoroutine := b.N / concurrency
 
+	var wg sync.WaitGroup
 	b.ResetTimer()
 	wg.Add(concurrency)
 	for g := 0; g < concurrency; g++ {
@@ -70,27 +65,27 @@ func BenchmarkRateLimit_ConcurrentSingleUser(b *testing.B) {
 }
 
 // ----------------------------
-// Benchmark: sliding window precision under concurrency
-// Simulate 3 requests per second for a hot user
+// Redis benchmarks
 // ----------------------------
-func BenchmarkRateLimit_SlidingWindowHotUser(b *testing.B) {
-	resetLimiterState()
-	user := "hot-user"
-	limit := 3
+func BenchmarkRateLimitRedis_MultiUserConcurrent(b *testing.B) {
+	InitRedis("localhost:6379", "", 0)
+	numUsers := 50
+	limit := 5
+	users := make([]string, numUsers)
+	for i := 0; i < numUsers; i++ {
+		users[i] = "user-" + strconv.Itoa(i)
+	}
 
 	var wg sync.WaitGroup
-	concurrency := 10
-	opsPerGoroutine := b.N / concurrency
-
-	wg.Add(concurrency)
 	b.ResetTimer()
-	for g := 0; g < concurrency; g++ {
-		go func() {
-			defer wg.Done()
-			for i := 0; i < opsPerGoroutine; i++ {
-				_ = RateLimit(user, limit)
-			}
-		}()
+	for g := 0; g < b.N; g++ {
+		for _, u := range users {
+			wg.Add(1)
+			go func(user string) {
+				defer wg.Done()
+				_ = RateLimitRedis(user, limit)
+			}(u)
+		}
 	}
 	wg.Wait()
 }

@@ -1,39 +1,44 @@
 package limiter
 
 import (
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// NOTE:
-// These tests assume there is a function with signature:
-//   func RateLimit(userId string, limit int) bool
-// implemented in the same package (limiter).
-//
-// We'll implement RateLimit in limiter.go next. For now, these tests
-// drive the intended behavior for single-instance per-user rate limiting,
-// where `limit` is requests-per-second for that user.
+// resetLimiterState clears all global state for a clean test environment.
+// Go test runner executes tests in the same process, so global sync.Maps persist between tests.
+func resetLimiterState() {
+	userBuckets = sync.Map{}
+	userConfig = sync.Map{}
+}
+
+// ------------------------------------------------------------
+//  Basic single-user rate limit behavior
+// ------------------------------------------------------------
 
 func TestRateLimit_SingleUserBasic(t *testing.T) {
+	resetLimiterState()
+
 	user := "userA"
 	limit := 5
 
-	// consume exactly `limit` requests -> all should be allowed
-	for i := range limit {
+	// Consume exactly `limit` requests -> all should be allowed
+	for i := 0; i < limit; i++ {
 		if !RateLimit(user, limit) {
 			t.Fatalf("expected request %d to be allowed (limit=%d)", i+1, limit)
 		}
 	}
 
-	// next request should be denied immediately
+	// Next request should be denied immediately
 	if RateLimit(user, limit) {
 		t.Fatal("expected request to be denied after exceeding limit")
 	}
 
-	// wait for one token to refill: 1/limit seconds (plus small epsilon)
-	sleep := time.Duration(1100/limit) * time.Millisecond // conservative
+	// Wait ~1/limit sec to allow one token refill
+	sleep := time.Duration(1100/limit) * time.Millisecond
 	time.Sleep(sleep)
 
 	if !RateLimit(user, limit) {
@@ -41,12 +46,18 @@ func TestRateLimit_SingleUserBasic(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------------------
+//  Multiple users should have independent buckets
+// ------------------------------------------------------------
+
 func TestRateLimit_MultipleUsersIndependent(t *testing.T) {
+	resetLimiterState()
+
 	u1 := "alice"
 	u2 := "bob"
 	limit := 2
 
-	// Each user should be able to make `limit` requests independently
+	// Each user can make `limit` requests independently
 	for i := 0; i < limit; i++ {
 		if !RateLimit(u1, limit) {
 			t.Fatalf("expected %s request %d allowed", u1, i+1)
@@ -65,16 +76,21 @@ func TestRateLimit_MultipleUsersIndependent(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------------------
+//  Concurrency: multiple goroutines calling same user
+// ------------------------------------------------------------
+
 func TestRateLimit_ConcurrentSingleUser(t *testing.T) {
+	resetLimiterState()
+
 	user := "concurrent-user"
 	limit := 10
-
-	// attempt 100 concurrent requests; only up to `limit` should be allowed
-	var allowed int32
-	var wg sync.WaitGroup
 	tryCount := 100
 
+	var allowed int32
+	var wg sync.WaitGroup
 	wg.Add(tryCount)
+
 	for i := 0; i < tryCount; i++ {
 		go func() {
 			defer wg.Done()
@@ -88,36 +104,71 @@ func TestRateLimit_ConcurrentSingleUser(t *testing.T) {
 	if allowed > int32(limit) {
 		t.Fatalf("allowed more requests (%d) than limit (%d)", allowed, limit)
 	}
-	// allow some slack: we expect between 0 and limit allowed; at least 1 should be allowed
 	if allowed == 0 {
 		t.Fatalf("expected at least 1 allowed request, got 0")
 	}
 }
 
-func TestRateLimit_DynamicLimitIncrease(t *testing.T) {
-	user := "dynamic-user"
-	limit1 := 1
-	limit2 := 4
+// ------------------------------------------------------------
+//  Dynamic configuration: runtime SetUserLimit() override
+// ------------------------------------------------------------
 
-	// With limit1, only one request should be allowed initially
-	if !RateLimit(user, limit1) {
-		t.Fatal("first request (limit1) should be allowed")
+func TestRateLimit_UsesConfiguredLimit(t *testing.T) {
+	resetLimiterState()
+
+	user := "alice"
+	SetUserLimit(user, 1)
+
+	// First request should be allowed
+	if !RateLimit(user, 100) { // passed 100 but config overrides to 1
+		t.Fatal("expected first request allowed")
 	}
-	if RateLimit(user, limit1) {
-		t.Fatal("second request (limit1) should be denied")
+
+	// Second request should be denied (limit = 1)
+	if RateLimit(user, 100) {
+		t.Fatal("expected second request denied due to config override")
+	}
+}
+
+// ------------------------------------------------------------
+//  Config file: LoadUserConfigFromJSON
+// ------------------------------------------------------------
+
+func TestLoadUserConfigFromJSON(t *testing.T) {
+	resetLimiterState()
+
+	// Create a temporary config file for this test
+	tmpFile := "test_users.json"
+	configJSON := `{
+		"alice": 2,
+		"bob": 4
+	}`
+	if err := os.WriteFile(tmpFile, []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write temp config: %v", err)
+	}
+	defer os.Remove(tmpFile)
+
+	// Load config from file
+	if err := LoadUserConfigFromJSON(tmpFile); err != nil {
+		t.Fatalf("failed to load config: %v", err)
 	}
 
-	// After increasing limit (passing larger `limit2`), we should be allowed more requests.
-	// Sleep a small amount to allow any internal token accounting to proceed.
-	time.Sleep(300 * time.Millisecond)
+	// Validate loaded limits
+	if limit, ok := GetUserLimit("alice"); !ok || limit != 2 {
+		t.Fatalf("expected alice=2, got %v (ok=%v)", limit, ok)
+	}
+	if limit, ok := GetUserLimit("bob"); !ok || limit != 4 {
+		t.Fatalf("expected bob=4, got %v (ok=%v)", limit, ok)
+	}
 
-	allowedCount := 0
-	for i := 0; i < limit2; i++ {
-		if RateLimit(user, limit2) {
-			allowedCount++
+	// Ensure RateLimit respects loaded config
+	user := "bob"
+	for i := 0; i < 4; i++ {
+		if !RateLimit(user, 100) {
+			t.Fatalf("expected request %d allowed (limit=4)", i+1)
 		}
 	}
-	if allowedCount == 0 {
-		t.Fatalf("expected at least some allowed requests after increasing limit to %d", limit2)
+	if RateLimit(user, 100) {
+		t.Fatal("expected request denied after exceeding limit")
 	}
 }

@@ -100,29 +100,41 @@ func InitRedis(addr string, password string, db int) {
 	})
 }
 
-// Distributed sliding-window
+// RateLimitRedis checks and updates rate limit in Redis.
+// limit = max requests per second.
 func RateLimitRedis(userID string, limit int) bool {
 	if rdb == nil || limit <= 0 {
 		return false
 	}
 
-	now := time.Now().UnixMilli()
-	oneSecondAgo := now - 1000
+	nowMs := time.Now().UnixMilli()
+	nowNs := time.Now().UnixNano() // unique member per call
+	oneSecondAgoMs := nowMs - 1000
+
 	key := "rate:" + userID
 
-	script := redis.NewScript(`
+	// Lua script ensures atomic operation.
+	// ARGV[1] = cutoff (oneSecondAgoMs)
+	// ARGV[2] = limit
+	// ARGV[3] = score (nowMs)
+	// ARGV[4] = member (unique string, e.g., nowNs)
+	const lua = `
+		-- remove timestamps older than 1 second (by score)
 		redis.call("ZREMRANGEBYSCORE", KEYS[1], 0, ARGV[1])
 		local current = redis.call("ZCARD", KEYS[1])
 		if tonumber(current) < tonumber(ARGV[2]) then
-			redis.call("ZADD", KEYS[1], ARGV[3], ARGV[3])
+			redis.call("ZADD", KEYS[1], ARGV[3], ARGV[4])
 			redis.call("PEXPIRE", KEYS[1], 2000)
 			return 1
 		else
 			return 0
 		end
-	`)
-	res, err := script.Run(ctx, rdb, []string{key}, oneSecondAgo, limit, now).Int()
+	`
+
+	// Run script with cutoff, limit, score, member
+	res, err := redis.NewScript(lua).Run(ctx, rdb, []string{key}, oneSecondAgoMs, limit, nowMs, nowNs).Int()
 	if err != nil {
+		// optionally log err for debugging; do not fail hard in production
 		return false
 	}
 	return res == 1

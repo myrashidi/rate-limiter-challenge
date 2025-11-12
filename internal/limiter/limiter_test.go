@@ -72,11 +72,16 @@ func TestRateLimit_SlidingWindowPrecision(t *testing.T) {
 	}
 
 	time.Sleep(1100 * time.Millisecond)
-	if !RateLimit(user, limit) {
-		t.Fatal("request after window slides should be allowed")
+	// Now we should be able to perform `limit` new requests again
+	for i := 1; i <= limit; i++ {
+		if !RateLimit(user, limit) {
+			t.Fatalf("after sliding window, request %d should be allowed", i)
+		}
 	}
+
+	// The next one should be denied again
 	if RateLimit(user, limit) {
-		t.Fatal("next request should still be denied until window slides again")
+		t.Fatal("after consuming limit requests again, next one should be denied")
 	}
 }
 
@@ -88,6 +93,7 @@ func TestRateLimit_UsesConfiguredLimit(t *testing.T) {
 	if !RateLimit(user, 100) || !RateLimit(user, 100) {
 		t.Fatal("first two requests should be allowed")
 	}
+
 	if RateLimit(user, 100) {
 		t.Fatal("third request should be denied")
 	}

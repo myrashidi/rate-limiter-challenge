@@ -8,16 +8,21 @@ import (
 	"time"
 )
 
-// ----------------------------
-// Test: basic correctness under concurrency
-// ----------------------------
+// TestRateLimitRedis_ConcurrentSingleUser
 func TestRateLimitRedis_ConcurrentSingleUser(t *testing.T) {
 	InitRedis("localhost:6379", "", 0)
+	if rdb == nil {
+		t.Skip("redis not available")
+	}
+	// ensure clean DB
+	if err := rdb.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("failed to flush redis DB: %v", err)
+	}
+
 	user := "redis-concurrent"
 	limit := 10
-	rdb.Del(ctx, "rate:"+user)
-
 	const goroutines = 100
+
 	var allowed int32
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
@@ -30,49 +35,50 @@ func TestRateLimitRedis_ConcurrentSingleUser(t *testing.T) {
 			}
 		}()
 	}
-
 	wg.Wait()
 	if allowed > int32(limit) {
 		t.Fatalf("expected <= %d allowed, got %d", limit, allowed)
 	}
 }
 
-// ----------------------------
-// Test: same-millisecond burst
-// ----------------------------
+// TestRateLimitRedis_SameMillisecondBurst
 func TestRateLimitRedis_SameMillisecondBurst(t *testing.T) {
 	InitRedis("localhost:6379", "", 0)
-	user := "redis-same-ms"
-	limit := 3
-	rdb.Del(ctx, "rate:"+user)
-
-	// All calls happen in same millisecond
-	start := time.Now()
-	for i := 0; i < limit; i++ {
-		if !RateLimit(user, limit) {
-			t.Fatalf("request %d at %v should be allowed", i+1, time.Since(start))
-		}
+	if rdb == nil {
+		t.Skip("redis not available")
+	}
+	if err := rdb.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("failed to flush redis DB: %v", err)
 	}
 
-	// Next one should be denied
+	user := "redis-same-ms"
+	limit := 3
+
+	for i := 0; i < limit; i++ {
+		if !RateLimit(user, limit) {
+			t.Fatalf("request %d should be allowed", i+1)
+		}
+	}
 	if RateLimit(user, limit) {
-		t.Fatal("next request should be denied even in same millisecond burst")
+		t.Fatal("next request should be denied")
 	}
 }
 
-// ----------------------------
-// Test: multi-user parallel
-// ----------------------------
+// TestRateLimitRedis_MultiUserParallel
 func TestRateLimitRedis_MultiUserParallel(t *testing.T) {
 	InitRedis("localhost:6379", "", 0)
+	if rdb == nil {
+		t.Skip("redis not available")
+	}
+	if err := rdb.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("failed to flush redis DB: %v", err)
+	}
+
 	numUsers := 30
 	limit := 5
 	users := make([]string, numUsers)
 	for i := 0; i < numUsers; i++ {
 		users[i] = "redis-user-" + strconv.Itoa(i)
-	}
-	for _, u := range users {
-		rdb.Del(ctx, "rate:"+u)
 	}
 
 	var wg sync.WaitGroup
@@ -93,26 +99,27 @@ func TestRateLimitRedis_MultiUserParallel(t *testing.T) {
 	wg.Wait()
 }
 
-// ----------------------------
-// Test: wait-for-expiry behavior
-// ----------------------------
+// TestRateLimitRedis_WindowExpiry
 func TestRateLimitRedis_WindowExpiry(t *testing.T) {
 	InitRedis("localhost:6379", "", 0)
+	if rdb == nil {
+		t.Skip("redis not available")
+	}
+	if err := rdb.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("failed to flush redis DB: %v", err)
+	}
+
 	user := "redis-expiry"
 	limit := 3
-	rdb.Del(ctx, "rate:"+user)
-
 	for i := 0; i < limit; i++ {
 		if !RateLimit(user, limit) {
 			t.Fatalf("request %d should be allowed", i+1)
 		}
 	}
-
 	if RateLimit(user, limit) {
 		t.Fatal("request exceeding limit should be denied")
 	}
 
-	// After >1s, window clears
 	time.Sleep(1100 * time.Millisecond)
 	for i := 0; i < limit; i++ {
 		if !RateLimit(user, limit) {

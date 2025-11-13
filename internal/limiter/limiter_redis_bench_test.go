@@ -11,9 +11,13 @@ import (
 // ----------------------------
 func BenchmarkRateLimitRedis_SingleUser(b *testing.B) {
 	InitRedis("localhost:6379", "", 0)
+	if rdb == nil {
+		b.Skip("redis not available")
+	}
+	_ = rdb.FlushDB(ctx).Err()
+
 	user := "bench-redis-single"
 	limit := 1000
-	rdb.Del(ctx, "rate:"+user)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -26,9 +30,13 @@ func BenchmarkRateLimitRedis_SingleUser(b *testing.B) {
 // ----------------------------
 func BenchmarkRateLimitRedis_ConcurrentHotUser(b *testing.B) {
 	InitRedis("localhost:6379", "", 0)
+	if rdb == nil {
+		b.Skip("redis not available")
+	}
+	_ = rdb.FlushDB(ctx).Err()
+
 	user := "bench-redis-hot"
 	limit := 100
-	rdb.Del(ctx, "rate:"+user)
 
 	concurrency := 50
 	opsPerGoroutine := b.N / concurrency
@@ -52,6 +60,11 @@ func BenchmarkRateLimitRedis_ConcurrentHotUser(b *testing.B) {
 // ----------------------------
 func BenchmarkRateLimitRedis_ManyUsersConcurrent(b *testing.B) {
 	InitRedis("localhost:6379", "", 0)
+	if rdb == nil {
+		b.Skip("redis not available")
+	}
+	_ = rdb.FlushDB(ctx).Err()
+
 	numUsers := 200
 	limit := 20
 	users := make([]string, numUsers)

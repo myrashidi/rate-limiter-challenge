@@ -9,12 +9,14 @@ import (
 	"time"
 )
 
+// resetLimiterState clears in-memory state and disables Redis (so tests start fresh).
 func resetLimiterState() {
 	// reset maps used by package
 	userBuckets = sync.Map{}
 	userSlices = sync.Map{}
 	userConfig = sync.Map{}
-	// note: we don't touch rdb here
+	// disable Redis by default; Redis tests will re-init it explicitly
+	rdb = nil
 }
 
 // ----------------------------
@@ -104,9 +106,13 @@ func TestRateLimit_UsesConfiguredLimit(t *testing.T) {
 
 func TestLoadUserConfigFromJSON(t *testing.T) {
 	resetLimiterState()
+	// Run this test in-memory (no Redis) to avoid cross-test contamination.
+	// If you want to test config with Redis, add a Redis-specific test that flushes DB.
 	tmpFile := "test_users.json"
 	configJSON := `{"alice":2,"bob":4}`
-	os.WriteFile(tmpFile, []byte(configJSON), 0644)
+	if err := os.WriteFile(tmpFile, []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write tmp config: %v", err)
+	}
 	defer os.Remove(tmpFile)
 
 	if err := LoadUserConfigFromJSON(tmpFile); err != nil {
@@ -188,12 +194,17 @@ func TestRateLimit_MultiUserConcurrent(t *testing.T) {
 // Redis tests (call unified RateLimit after InitRedis)
 // ----------------------------
 func TestRateLimitRedisBasic(t *testing.T) {
-	// ensure redis is available
+	// ensure redis is available and start with a clean DB
 	InitRedis("localhost:6379", "", 0)
+	if rdb == nil {
+		t.Skip("redis not initialized")
+	}
+	if err := rdb.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("failed to flush redis DB: %v", err)
+	}
+
 	user := "redis-user"
 	limit := 3
-	rdb.Del(ctx, "rate:"+user)
-
 	for i := 1; i <= limit; i++ {
 		if !RateLimit(user, limit) {
 			t.Fatalf("request %d should be allowed", i)

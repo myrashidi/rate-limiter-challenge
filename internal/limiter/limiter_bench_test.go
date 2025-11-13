@@ -68,7 +68,13 @@ func BenchmarkRateLimit_ConcurrentSingleUser(b *testing.B) {
 // Redis benchmarks
 // ----------------------------
 func BenchmarkRateLimitRedis_MultiUserConcurrent(b *testing.B) {
+	// ensure redis and start from a clean DB
 	InitRedis("localhost:6379", "", 0)
+	if rdb == nil {
+		b.Skip("redis not available")
+	}
+	_ = rdb.FlushDB(ctx).Err()
+
 	numUsers := 50
 	limit := 5
 	users := make([]string, numUsers)

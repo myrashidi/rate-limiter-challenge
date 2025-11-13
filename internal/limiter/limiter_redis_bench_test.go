@@ -6,9 +6,6 @@ import (
 	"testing"
 )
 
-// Run benchmarks with:
-//   go test -bench=. -benchmem -run ^$ ./internal/limiter
-
 // ----------------------------
 // Benchmark: single user sequential
 // ----------------------------
@@ -20,7 +17,7 @@ func BenchmarkRateLimitRedis_SingleUser(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = RateLimitRedis(user, limit)
+		_ = RateLimit(user, limit)
 	}
 }
 
@@ -43,7 +40,7 @@ func BenchmarkRateLimitRedis_ConcurrentHotUser(b *testing.B) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < opsPerGoroutine; i++ {
-				_ = RateLimitRedis(user, limit)
+				_ = RateLimit(user, limit)
 			}
 		}()
 	}
@@ -69,7 +66,7 @@ func BenchmarkRateLimitRedis_ManyUsersConcurrent(b *testing.B) {
 			wg.Add(1)
 			go func(user string) {
 				defer wg.Done()
-				_ = RateLimitRedis(user, limit)
+				_ = RateLimit(user, limit)
 			}(u)
 		}
 	}

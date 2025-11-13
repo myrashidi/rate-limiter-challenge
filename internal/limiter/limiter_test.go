@@ -10,12 +10,15 @@ import (
 )
 
 func resetLimiterState() {
+	// reset maps used by package
 	userBuckets = sync.Map{}
+	userSlices = sync.Map{}
 	userConfig = sync.Map{}
+	// note: we don't touch rdb here
 }
 
 // ----------------------------
-// In-memory tests
+// In-memory tests (use RateLimit)
 // ----------------------------
 func TestRateLimit_SingleUserSlidingWindow(t *testing.T) {
 	resetLimiterState()
@@ -33,8 +36,11 @@ func TestRateLimit_SingleUserSlidingWindow(t *testing.T) {
 	}
 
 	time.Sleep(1100 * time.Millisecond)
-	if !RateLimit(user, limit) {
-		t.Fatal("request after window slides should be allowed")
+	// after >1s, window cleared
+	for i := 1; i <= limit; i++ {
+		if !RateLimit(user, limit) {
+			t.Fatalf("after window slide, request %d should be allowed", i)
+		}
 	}
 }
 
@@ -72,16 +78,14 @@ func TestRateLimit_SlidingWindowPrecision(t *testing.T) {
 	}
 
 	time.Sleep(1100 * time.Millisecond)
-	// Now we should be able to perform `limit` new requests again
+	// Now limit requests allowed again
 	for i := 1; i <= limit; i++ {
 		if !RateLimit(user, limit) {
 			t.Fatalf("after sliding window, request %d should be allowed", i)
 		}
 	}
-
-	// The next one should be denied again
 	if RateLimit(user, limit) {
-		t.Fatal("after consuming limit requests again, next one should be denied")
+		t.Fatal("after consuming limit again, next should be denied")
 	}
 }
 
@@ -93,7 +97,6 @@ func TestRateLimit_UsesConfiguredLimit(t *testing.T) {
 	if !RateLimit(user, 100) || !RateLimit(user, 100) {
 		t.Fatal("first two requests should be allowed")
 	}
-
 	if RateLimit(user, 100) {
 		t.Fatal("third request should be denied")
 	}
@@ -182,24 +185,25 @@ func TestRateLimit_MultiUserConcurrent(t *testing.T) {
 }
 
 // ----------------------------
-// Redis tests
+// Redis tests (call unified RateLimit after InitRedis)
 // ----------------------------
 func TestRateLimitRedisBasic(t *testing.T) {
+	// ensure redis is available
 	InitRedis("localhost:6379", "", 0)
 	user := "redis-user"
 	limit := 3
 	rdb.Del(ctx, "rate:"+user)
 
 	for i := 1; i <= limit; i++ {
-		if !RateLimitRedis(user, limit) {
+		if !RateLimit(user, limit) {
 			t.Fatalf("request %d should be allowed", i)
 		}
 	}
-	if RateLimitRedis(user, limit) {
+	if RateLimit(user, limit) {
 		t.Fatal("next request should be denied")
 	}
 	time.Sleep(1100 * time.Millisecond)
-	if !RateLimitRedis(user, limit) {
+	if !RateLimit(user, limit) {
 		t.Fatal("request after window slides should be allowed")
 	}
 }

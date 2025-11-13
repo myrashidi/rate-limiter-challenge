@@ -11,12 +11,15 @@ import (
 )
 
 func main() {
-	// Load Redis connection info (or default to localhost)
+	// Load config first (optional)
+	if err := limiter.LoadUserConfigFromJSON("config/users.json"); err != nil {
+		log.Printf("No config loaded (this is fine for demo): %v", err)
+	}
+
+	// Init redis; if you don't want redis, skip this call (then RateLimit falls back to in-memory)
 	addr := getenv("REDIS_ADDR", "localhost:6379")
 	pass := getenv("REDIS_PASSWORD", "")
 	db := getenvInt("REDIS_DB", 0)
-
-	// Initialize Redis client
 	limiter.InitRedis(addr, pass, db)
 
 	http.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +29,8 @@ func main() {
 			return
 		}
 
-		if !limiter.RateLimitRedis(user, 5) {
+		// Call unified RateLimit; default limit 5 (used when user not configured)
+		if !limiter.RateLimit(user, 5) {
 			http.Error(w, fmt.Sprintf("Rate limit exceeded for user %s", user), http.StatusTooManyRequests)
 			return
 		}

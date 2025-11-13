@@ -3,19 +3,10 @@ package limiter
 import (
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// Before running these tests, ensure Redis is running at localhost:6379.
-// Run only Redis tests:
-//   go test -v -run TestRateLimitRedis
-
-func resetRedisKeys(users []string) {
-	for _, u := range users {
-		rdb.Del(ctx, "rate:"+u)
-	}
-}
 
 // ----------------------------
 // Test: basic correctness under concurrency
@@ -34,9 +25,8 @@ func TestRateLimitRedis_ConcurrentSingleUser(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			if RateLimitRedis(user, limit) {
-				// atomic add not necessary for test semantics
-				allowed++
+			if RateLimit(user, limit) {
+				atomic.AddInt32(&allowed, 1)
 			}
 		}()
 	}
@@ -59,13 +49,13 @@ func TestRateLimitRedis_SameMillisecondBurst(t *testing.T) {
 	// All calls happen in same millisecond
 	start := time.Now()
 	for i := 0; i < limit; i++ {
-		if !RateLimitRedis(user, limit) {
+		if !RateLimit(user, limit) {
 			t.Fatalf("request %d at %v should be allowed", i+1, time.Since(start))
 		}
 	}
 
 	// Next one should be denied
-	if RateLimitRedis(user, limit) {
+	if RateLimit(user, limit) {
 		t.Fatal("next request should be denied even in same millisecond burst")
 	}
 }
@@ -81,7 +71,9 @@ func TestRateLimitRedis_MultiUserParallel(t *testing.T) {
 	for i := 0; i < numUsers; i++ {
 		users[i] = "redis-user-" + strconv.Itoa(i)
 	}
-	resetRedisKeys(users)
+	for _, u := range users {
+		rdb.Del(ctx, "rate:"+u)
+	}
 
 	var wg sync.WaitGroup
 	for _, u := range users {
@@ -89,11 +81,11 @@ func TestRateLimitRedis_MultiUserParallel(t *testing.T) {
 		go func(user string) {
 			defer wg.Done()
 			for i := 0; i < limit; i++ {
-				if !RateLimitRedis(user, limit) {
+				if !RateLimit(user, limit) {
 					t.Fatalf("%s request %d should be allowed", user, i+1)
 				}
 			}
-			if RateLimitRedis(user, limit) {
+			if RateLimit(user, limit) {
 				t.Fatalf("%s request exceeding limit should be denied", user)
 			}
 		}(u)
@@ -111,19 +103,19 @@ func TestRateLimitRedis_WindowExpiry(t *testing.T) {
 	rdb.Del(ctx, "rate:"+user)
 
 	for i := 0; i < limit; i++ {
-		if !RateLimitRedis(user, limit) {
+		if !RateLimit(user, limit) {
 			t.Fatalf("request %d should be allowed", i+1)
 		}
 	}
 
-	if RateLimitRedis(user, limit) {
+	if RateLimit(user, limit) {
 		t.Fatal("request exceeding limit should be denied")
 	}
 
 	// After >1s, window clears
 	time.Sleep(1100 * time.Millisecond)
 	for i := 0; i < limit; i++ {
-		if !RateLimitRedis(user, limit) {
+		if !RateLimit(user, limit) {
 			t.Fatalf("after window clears, request %d should be allowed", i+1)
 		}
 	}

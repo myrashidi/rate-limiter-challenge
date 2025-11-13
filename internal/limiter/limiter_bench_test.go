@@ -83,7 +83,7 @@ func BenchmarkRateLimitRedis_MultiUserConcurrent(b *testing.B) {
 			wg.Add(1)
 			go func(user string) {
 				defer wg.Done()
-				_ = RateLimitRedis(user, limit)
+				_ = RateLimit(user, limit)
 			}(u)
 		}
 	}

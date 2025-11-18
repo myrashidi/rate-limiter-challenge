@@ -11,12 +11,17 @@ import (
 )
 
 func main() {
+	// Set mode from env if present: "sliding" or "leaky"
+	mode := getenv("RATE_LIMIT_MODE", "sliding")
+	limiter.SetMode(mode)
+	log.Printf("Rate limiter mode: %s", limiter.GetMode())
+
 	// Load config first (optional)
 	if err := limiter.LoadUserConfigFromJSON("config/users.json"); err != nil {
 		log.Printf("No config loaded (this is fine for demo): %v", err)
 	}
 
-	// Init redis; if you don't want redis, skip this call (then RateLimit falls back to in-memory)
+	// Init redis (optional). If you want pure in-memory mode, don't call InitRedis.
 	addr := getenv("REDIS_ADDR", "localhost:6379")
 	pass := getenv("REDIS_PASSWORD", "")
 	db := getenvInt("REDIS_DB", 0)
@@ -29,8 +34,9 @@ func main() {
 			return
 		}
 
-		// Call unified RateLimit; default limit 5 (used when user not configured)
-		if !limiter.RateLimit(user, 5) {
+		// Default limit if user not configured
+		defaultLimit := 5
+		if !limiter.RateLimit(user, defaultLimit) {
 			http.Error(w, fmt.Sprintf("Rate limit exceeded for user %s", user), http.StatusTooManyRequests)
 			return
 		}
@@ -42,7 +48,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func getenv(key, def string) string {
+func getenv(key string, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}

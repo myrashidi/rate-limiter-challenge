@@ -6,9 +6,6 @@ import (
 	"testing"
 )
 
-// ----------------------------
-// Benchmark: single user sequential
-// ----------------------------
 func BenchmarkRateLimitRedis_SingleUser(b *testing.B) {
 	InitRedis("localhost:6379", "", 0)
 	if rdb == nil {
@@ -16,6 +13,7 @@ func BenchmarkRateLimitRedis_SingleUser(b *testing.B) {
 	}
 	_ = rdb.FlushDB(ctx).Err()
 
+	SetMode("sliding")
 	user := "bench-redis-single"
 	limit := 1000
 
@@ -25,46 +23,14 @@ func BenchmarkRateLimitRedis_SingleUser(b *testing.B) {
 	}
 }
 
-// ----------------------------
-// Benchmark: high concurrency on single hot user
-// ----------------------------
-func BenchmarkRateLimitRedis_ConcurrentHotUser(b *testing.B) {
+func BenchmarkRateLimitRedis_ManyUsers(b *testing.B) {
 	InitRedis("localhost:6379", "", 0)
 	if rdb == nil {
 		b.Skip("redis not available")
 	}
 	_ = rdb.FlushDB(ctx).Err()
 
-	user := "bench-redis-hot"
-	limit := 100
-
-	concurrency := 50
-	opsPerGoroutine := b.N / concurrency
-
-	var wg sync.WaitGroup
-	b.ResetTimer()
-	wg.Add(concurrency)
-	for g := 0; g < concurrency; g++ {
-		go func() {
-			defer wg.Done()
-			for i := 0; i < opsPerGoroutine; i++ {
-				_ = RateLimit(user, limit)
-			}
-		}()
-	}
-	wg.Wait()
-}
-
-// ----------------------------
-// Benchmark: many concurrent users
-// ----------------------------
-func BenchmarkRateLimitRedis_ManyUsersConcurrent(b *testing.B) {
-	InitRedis("localhost:6379", "", 0)
-	if rdb == nil {
-		b.Skip("redis not available")
-	}
-	_ = rdb.FlushDB(ctx).Err()
-
+	SetMode("sliding")
 	numUsers := 200
 	limit := 20
 	users := make([]string, numUsers)
